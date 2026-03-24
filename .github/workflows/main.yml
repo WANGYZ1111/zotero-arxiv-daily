@@ -1,24 +1,101 @@
-name: Send emails daily
+name: Send arXiv Papers Daily to Email
+
+# 触发条件：手动触发 + 定时触发（UTC 8点 = 北京时间16点）
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 手动运行
   schedule:
-    - cron: '0 22 * * *'
+    - cron: '0 8 * * *'  # 北京时间 16:00 运行（UTC+8）
 
 jobs:
   calculate-and-send:
     runs-on: ubuntu-latest
+    env:
+      # 全局环境变量（所有步骤共享）
+      DEBUG: "true"
+      HYDRA_FULL_ERROR: "1"  # 打印完整错误栈，方便调试
+
     steps:
-      - name: Checkout
+      # 1. 拉取代码仓库
+      - name: Checkout Code
         uses: actions/checkout@v6
         with:
-          repository: ${{ vars.REPOSITORY }}
-          ref: ${{ vars.REF }}
+          repository: ${{ vars.REPOSITORY }}  # 从变量读取仓库地址
+          ref: ${{ vars.REF }}                # 从变量读取分支/标签
+          fetch-depth: 1                      # 仅拉取最新代码，加速
 
-      - name: Setup uv
+      # 2. 安装 uv 包管理工具
+      - name: Setup UV
         uses: astral-sh/setup-uv@v7
+        with:
+          uv-version: "latest"  # 使用最新版 uv
 
-      - name: Run script
+      # 3. 创建配置文件（解决 executor.source 缺失问题）
+      - name: Generate Custom Config
+        run: |
+          # 创建 config 目录（确保存在）
+          mkdir -p config
+          # 写入完整配置文件（包含所有必填项）
+          cat > config/custom.yaml << EOF
+          # 邮箱配置
+          email:
+            sender: ${SENDER}
+            receiver: ${RECEIVER}
+            smtp_server: smtp.163.com
+            smtp_port: 465
+            sender_password: ${SENDER_PASSWORD}
+
+          # LLM 配置（按需启用）
+          llm:
+            api:
+              key: ${OPENAI_API_KEY}
+              base_url: ${OPENAI_API_BASE}
+            generation_kwargs:
+              model: gpt-4o-mini
+
+          # arXiv 数据源配置
+          source:
+            arxiv:
+              category: ["cs.AI","cs.CV","cs.LG","eess.SP","eess.IV"]
+              include_cross_list: true
+
+          # 执行器核心配置（必须有！）
+          executor:
+            debug: ${DEBUG}
+            source: ['arxiv']
+
+          # Zotero 配置
+          zotero:
+            user_id: ${ZOTERO_ID}
+            api_key: ${ZOTERO_KEY}
+            include_path: null
+          EOF
+
+          # 打印配置文件内容，确认正确性
+          echo "=== Generated Custom Config ==="
+          cat config/custom.yaml
+          echo "================================"
         env:
+          # 注入密钥到配置文件生成步骤
+          SENDER: ${{ secrets.SENDER }}
+          RECEIVER: ${{ secrets.RECEIVER }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+
+      # 4. 安装依赖并运行主脚本
+      - name: Run arXiv-Zotero Script
+        run: |
+          # 安装项目依赖（自动读取 pyproject.toml）
+          uv sync --frozen
+          # 显式指定配置文件运行脚本，打印详细日志
+          uv run python src/zotero_arxiv_daily/main.py \
+            --config-path ./config \
+            --config-name custom \
+            --hydra.job.chdir=true
+        env:
+          # 运行时注入所有密钥（兜底）
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
           ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
           SENDER: ${{ secrets.SENDER }}
@@ -26,9 +103,14 @@ jobs:
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
-          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
-        run: |
-          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
-          echo "Use custom config: "
-          cat config/custom.yaml
-          uv run src/zotero_arxiv_daily/main.py
+
+      # 5. （可选）上传配置文件和日志，方便调试
+      - name: Upload Debug Artifacts
+        if: always()  # 无论成功/失败都上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-files
+          path: |
+            config/custom.yaml
+            .hydra/
+            *.log
