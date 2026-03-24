@@ -92,7 +92,7 @@ jobs:
           uv run python src/zotero_arxiv_daily/main.py \
             --config-path ./config \
             --config-name custom \
-            --hydra.job.chdir=true
+            hydra.job.chdir=true
         env:
           # 运行时兜底注入所有密钥
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
